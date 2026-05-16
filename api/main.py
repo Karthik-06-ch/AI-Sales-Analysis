@@ -56,129 +56,138 @@ async def upload_and_forecast(file: UploadFile = File(...)):
             df = pd.read_csv(io.BytesIO(contents))
         else:
             df = pd.read_excel(io.BytesIO(contents))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
-    
-    # Auto-detect Date column
-    date_col = None
-    for col in df.columns:
-        if 'date' in col.lower() or 'time' in col.lower() or 'month' in col.lower() or 'year' in col.lower():
-            date_col = col
-            break
-            
-    if not date_col:
+    try:
+        # Auto-detect Date column
+        date_col = None
         for col in df.columns:
-            if df[col].dtype == 'object':
-                try:
-                    pd.to_datetime(df[col].dropna().iloc[0])
-                    date_col = col
-                    break
-                except:
-                    pass
+            if 'date' in col.lower() or 'time' in col.lower() or 'month' in col.lower() or 'year' in col.lower():
+                date_col = col
+                break
+                
+        if not date_col:
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    try:
+                        pd.to_datetime(df[col].dropna().iloc[0])
+                        date_col = col
+                        break
+                    except:
+                        pass
 
-    if not date_col:
-        raise HTTPException(status_code=400, detail="Could not detect a Date/Time column in the dataset.")
+        if not date_col:
+            raise HTTPException(status_code=400, detail="Could not detect a Date/Time column in the dataset.")
 
-    # Auto-detect target metric (Sales, Revenue, etc.)
-    target_col = None
-    for col in df.columns:
-        if col.lower() in ['sales', 'revenue', 'total', 'amount', 'profit', 'quantity']:
-            target_col = col
-            break
+        # Auto-detect target metric (Sales, Revenue, etc.)
+        target_col = None
+        for col in df.columns:
+            if col.lower() in ['sales', 'revenue', 'total', 'amount', 'profit', 'quantity', 'price']:
+                target_col = col
+                break
+                
+        if not target_col:
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if date_col in numeric_cols:
+                numeric_cols.remove(date_col)
+            if numeric_cols:
+                target_col = numeric_cols[-1] # Usually the last numeric column is the target
+
+        if not target_col:
+            raise HTTPException(status_code=400, detail="Could not detect a numeric target column (e.g., Sales, Price) in the dataset.")
+
+        # Rename them internally so the rest of the script works
+        df = df.rename(columns={date_col: 'Date', target_col: 'Sales'})
+        
+        # Clean the target column in case it has currency symbols like '$' or commas ','
+        if df['Sales'].dtype == 'object':
+            df['Sales'] = df['Sales'].astype(str).str.replace(r'[$,]', '', regex=True)
+            df['Sales'] = pd.to_numeric(df['Sales'], errors='coerce')
+        
+        df = df.dropna(subset=['Date', 'Sales'])
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.dropna(subset=['Date', 'Sales'])
+        df = df.sort_values('Date')
+        df['Month_Year'] = df['Date'].dt.to_period('M').astype(str)
+        
+        # Aggregation for forecasting (monthly)
+        monthly_sales = df.groupby('Month_Year')['Sales'].sum().reset_index()
+        monthly_sales['Date_Index'] = np.arange(len(monthly_sales))
+        
+        # Machine Learning - Linear Regression
+        if len(monthly_sales) < 3:
+            raise HTTPException(status_code=400, detail="Not enough data points to forecast. Please provide at least 3 months of data.")
             
-    if not target_col:
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        if date_col in numeric_cols:
-            numeric_cols.remove(date_col)
-        if numeric_cols:
-            target_col = numeric_cols[-1] # Usually the last numeric column is the target
-
-    if not target_col:
-        raise HTTPException(status_code=400, detail="Could not detect a numeric target column (e.g., Sales) in the dataset.")
-
-    # Rename them internally so the rest of the script works
-    df = df.rename(columns={date_col: 'Date', target_col: 'Sales'})
-    
-    df['Date'] = pd.to_datetime(df['Date'])
-    df = df.sort_values('Date')
-    df['Month_Year'] = df['Date'].dt.to_period('M').astype(str)
-    
-    # Aggregation for forecasting (monthly)
-    monthly_sales = df.groupby('Month_Year')['Sales'].sum().reset_index()
-    monthly_sales['Date_Index'] = np.arange(len(monthly_sales))
-    
-    # Machine Learning - Linear Regression
-    if len(monthly_sales) < 3:
-        raise HTTPException(status_code=400, detail="Not enough data points to forecast. Please provide at least 3 months of data.")
+        X = monthly_sales[['Date_Index']]
+        y = monthly_sales['Sales']
         
-    X = monthly_sales[['Date_Index']]
-    y = monthly_sales['Sales']
-    
-    model = LinearRegression()
-    model.fit(X, y)
-    
-    # Predict past to calculate accuracy (R-squared proxy for simple LR)
-    score = model.score(X, y)
-    accuracy = round(max(0.0, score * 100), 2)  # Cap min at 0%
-    
-    # Forecast next 6 months
-    last_index = monthly_sales['Date_Index'].max()
-    future_X = pd.DataFrame({'Date_Index': np.arange(last_index + 1, last_index + 7)})
-    future_predictions = model.predict(future_X)
-    
-    # Generate future periods
-    last_period = pd.Period(monthly_sales['Month_Year'].iloc[-1], freq='M')
-    future_periods = [(last_period + i).astype(str) for i in range(1, 7)]
-    
-    predictions_list = [
-        {"Month_Year": future_periods[i], "Predicted_Sales": float(future_predictions[i])}
-        for i in range(len(future_periods))
-    ]
-    
-    historical_list = monthly_sales[['Month_Year', 'Sales']].to_dict(orient='records')
-    
-    # Additional Analytics
-    total_sales = float(df['Sales'].sum())
-    predicted_revenue = float(sum(future_predictions))
-    
-    # Seasonal Trends (by Month Name)
-    df['Month_Name'] = df['Date'].dt.month_name()
-    seasonal = df.groupby('Month_Name')['Sales'].sum().to_dict()
-    
-    # Category Insights & Region Insights
-    category_insights = {}
-    region_insights = {}
-    
-    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    categorical_cols = [c for c in categorical_cols if c not in ['Date', 'Month_Year', 'Month_Name'] and df[c].nunique() < 50]
-    
-    if len(categorical_cols) > 0:
-        cat_col = categorical_cols[0]
-        cat_sales = df.groupby(cat_col)['Sales'].sum().sort_values(ascending=False)
-        category_insights = cat_sales.head(5).to_dict()
+        model = LinearRegression()
+        model.fit(X, y)
         
-    if len(categorical_cols) > 1:
-        reg_col = categorical_cols[1]
-        reg_sales = df.groupby(reg_col)['Sales'].sum().sort_values(ascending=False)
-        region_insights = reg_sales.head(5).to_dict()
-    
-    # Smart Alerts / AI Recommendations
-    recent_trend = future_predictions[0] - monthly_sales['Sales'].iloc[-1]
-    recommendation = "Demand is expected to grow. Stock up on inventory." if recent_trend > 0 else "Demand shows a slight decline. Optimize your marketing spend and run targeted promotions."
-    
-    insights = {
-        "recommendation": recommendation,
-        "top_category": list(category_insights.keys())[0] if category_insights else "N/A",
-        "top_region": list(region_insights.keys())[0] if region_insights else "N/A"
-    }
+        # Predict past to calculate accuracy (R-squared proxy for simple LR)
+        score = model.score(X, y)
+        accuracy = round(max(0.0, score * 100), 2)  # Cap min at 0%
+        
+        # Forecast next 6 months
+        last_index = monthly_sales['Date_Index'].max()
+        future_X = pd.DataFrame({'Date_Index': np.arange(last_index + 1, last_index + 7)})
+        future_predictions = model.predict(future_X)
+        
+        # Generate future periods
+        last_period = pd.Period(monthly_sales['Month_Year'].iloc[-1], freq='M')
+        future_periods = [(last_period + i).astype(str) for i in range(1, 7)]
+        
+        predictions_list = [
+            {"Month_Year": future_periods[i], "Predicted_Sales": float(future_predictions[i])}
+            for i in range(len(future_periods))
+        ]
+        
+        historical_list = monthly_sales[['Month_Year', 'Sales']].to_dict(orient='records')
+        
+        # Additional Analytics
+        total_sales = float(df['Sales'].sum())
+        predicted_revenue = float(sum(future_predictions))
+        
+        # Seasonal Trends (by Month Name)
+        df['Month_Name'] = df['Date'].dt.month_name()
+        seasonal = df.groupby('Month_Name')['Sales'].sum().to_dict()
+        
+        # Category Insights & Region Insights
+        category_insights = {}
+        region_insights = {}
+        
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        categorical_cols = [c for c in categorical_cols if c not in ['Date', 'Month_Year', 'Month_Name'] and df[c].nunique() < 50]
+        
+        if len(categorical_cols) > 0:
+            cat_col = categorical_cols[0]
+            cat_sales = df.groupby(cat_col)['Sales'].sum().sort_values(ascending=False)
+            category_insights = cat_sales.head(5).to_dict()
+            
+        if len(categorical_cols) > 1:
+            reg_col = categorical_cols[1]
+            reg_sales = df.groupby(reg_col)['Sales'].sum().sort_values(ascending=False)
+            region_insights = reg_sales.head(5).to_dict()
+        
+        # Smart Alerts / AI Recommendations
+        recent_trend = future_predictions[0] - monthly_sales['Sales'].iloc[-1]
+        recommendation = "Demand is expected to grow. Stock up on inventory." if recent_trend > 0 else "Demand shows a slight decline. Optimize your marketing spend and run targeted promotions."
+        
+        insights = {
+            "recommendation": recommendation,
+            "top_category": list(category_insights.keys())[0] if category_insights else "N/A",
+            "top_region": list(region_insights.keys())[0] if region_insights else "N/A"
+        }
 
-    return ForecastResponse(
-        insights=insights,
-        predictions=predictions_list,
-        historical=historical_list,
-        accuracy=accuracy,
-        total_sales=total_sales,
-        predicted_revenue=predicted_revenue,
-        seasonal_trends=seasonal,
-        category_insights=category_insights
-    )
+        return ForecastResponse(
+            insights=insights,
+            predictions=predictions_list,
+            historical=historical_list,
+            accuracy=accuracy,
+            total_sales=total_sales,
+            predicted_revenue=predicted_revenue,
+            seasonal_trends=seasonal,
+            category_insights=category_insights
+        )
+    except HTTPException:
+        raise
+    except Exception as err:
+        raise HTTPException(status_code=400, detail=f"Processing Error: {str(err)}. Ensure your dataset has valid date and numeric target columns.")
