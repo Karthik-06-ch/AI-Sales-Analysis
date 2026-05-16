@@ -100,10 +100,9 @@ async def upload_and_forecast(file: UploadFile = File(...)):
         # Rename them internally so the rest of the script works
         df = df.rename(columns={date_col: 'Date', target_col: 'Sales'})
         
-        # Clean the target column in case it has currency symbols like '$' or commas ','
-        if df['Sales'].dtype == 'object':
-            df['Sales'] = df['Sales'].astype(str).str.replace(r'[$,]', '', regex=True)
-            df['Sales'] = pd.to_numeric(df['Sales'], errors='coerce')
+        # Clean the target column to handle any currency symbols, commas, or text (e.g. '$10', '1,000 USD')
+        df['Sales'] = df['Sales'].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+        df['Sales'] = pd.to_numeric(df['Sales'], errors='coerce')
         
         df = df.dropna(subset=['Date', 'Sales'])
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
