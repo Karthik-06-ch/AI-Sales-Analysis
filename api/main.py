@@ -135,7 +135,7 @@ async def upload_and_forecast(file: UploadFile = File(...)):
         
         # Generate future periods
         last_period = pd.Period(monthly_sales['Month_Year'].iloc[-1], freq='M')
-        future_periods = [(last_period + i).astype(str) for i in range(1, 7)]
+        future_periods = [str(last_period + i) for i in range(1, 7)]
         
         predictions_list = [
             {"Month_Year": future_periods[i], "Predicted_Sales": float(future_predictions[i])}
