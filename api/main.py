@@ -132,11 +132,21 @@ async def upload_and_forecast(file: UploadFile = File(...)):
         
         # Aggregation for forecasting
         monthly_sales = df.groupby('Month_Year')['Sales'].sum().reset_index()
-        monthly_sales['Date_Index'] = np.arange(len(monthly_sales))
         
-        # Machine Learning - Linear Regression
         if len(monthly_sales) < 3:
-            raise HTTPException(status_code=400, detail=f"Dataset only spans {len(monthly_sales)} unique time periods ({'days' if freq=='D' else 'months'}). Need at least 3 points for a trend forecast.")
+            if len(df) < 3:
+                raise HTTPException(status_code=400, detail="Dataset has fewer than 3 rows. Cannot generate a trend forecast.")
+            
+            # Artificial spread for snapshot datasets (e.g. all rows have the same date)
+            days_spread = min(30, len(df))
+            df['Date_Group'] = np.linspace(0, days_spread - 1, len(df)).astype(int)
+            start_date = pd.Timestamp.now() - pd.DateOffset(days=days_spread)
+            df['Date'] = start_date + pd.to_timedelta(df['Date_Group'], unit='D')
+            df['Month_Year'] = df['Date'].dt.to_period('D')
+            monthly_sales = df.groupby('Month_Year')['Sales'].sum().reset_index()
+            freq = 'D'
+            
+        monthly_sales['Date_Index'] = np.arange(len(monthly_sales))
             
         X = monthly_sales[['Date_Index']]
         y = monthly_sales['Sales']
