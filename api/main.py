@@ -108,15 +108,26 @@ async def upload_and_forecast(file: UploadFile = File(...)):
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date', 'Sales'])
         df = df.sort_values('Date')
-        df['Month_Year'] = df['Date'].dt.to_period('M').astype(str)
         
-        # Aggregation for forecasting (monthly)
+        if len(df) == 0:
+            raise HTTPException(status_code=400, detail="All rows were dropped. Ensure your date column is formatted correctly.")
+
+        # Determine aggregation frequency
+        date_min = df['Date'].min()
+        date_max = df['Date'].max()
+        time_span_days = (date_max - date_min).days
+
+        freq = 'D' if time_span_days <= 90 else 'M'
+            
+        df['Month_Year'] = df['Date'].dt.to_period(freq)
+        
+        # Aggregation for forecasting
         monthly_sales = df.groupby('Month_Year')['Sales'].sum().reset_index()
         monthly_sales['Date_Index'] = np.arange(len(monthly_sales))
         
         # Machine Learning - Linear Regression
         if len(monthly_sales) < 3:
-            raise HTTPException(status_code=400, detail="Not enough data points to forecast. Please provide at least 3 months of data.")
+            raise HTTPException(status_code=400, detail=f"Dataset only spans {len(monthly_sales)} unique time periods ({'days' if freq=='D' else 'months'}). Need at least 3 points for a trend forecast.")
             
         X = monthly_sales[['Date_Index']]
         y = monthly_sales['Sales']
@@ -128,14 +139,17 @@ async def upload_and_forecast(file: UploadFile = File(...)):
         score = model.score(X, y)
         accuracy = round(max(0.0, score * 100), 2)  # Cap min at 0%
         
-        # Forecast next 6 months
+        # Forecast next 6 periods
         last_index = monthly_sales['Date_Index'].max()
         future_X = pd.DataFrame({'Date_Index': np.arange(last_index + 1, last_index + 7)})
         future_predictions = model.predict(future_X)
         
         # Generate future periods
-        last_period = pd.Period(monthly_sales['Month_Year'].iloc[-1], freq='M')
+        last_period = monthly_sales['Month_Year'].iloc[-1]
         future_periods = [str(last_period + i) for i in range(1, 7)]
+        
+        # Convert periods to strings for JSON serialization
+        monthly_sales['Month_Year'] = monthly_sales['Month_Year'].astype(str)
         
         predictions_list = [
             {"Month_Year": future_periods[i], "Predicted_Sales": float(future_predictions[i])}
