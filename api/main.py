@@ -56,6 +56,9 @@ async def upload_and_forecast(file: UploadFile = File(...)):
             df = pd.read_csv(io.BytesIO(contents))
         else:
             df = pd.read_excel(io.BytesIO(contents))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
+        
     try:
         # Auto-detect Date column
         date_col = None
