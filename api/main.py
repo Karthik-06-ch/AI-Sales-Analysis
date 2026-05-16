@@ -60,27 +60,7 @@ async def upload_and_forecast(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
         
     try:
-        # Auto-detect Date column
-        date_col = None
-        for col in df.columns:
-            if 'date' in col.lower() or 'time' in col.lower() or 'month' in col.lower() or 'year' in col.lower():
-                date_col = col
-                break
-                
-        if not date_col:
-            for col in df.columns:
-                if df[col].dtype == 'object':
-                    try:
-                        pd.to_datetime(df[col].dropna().iloc[0])
-                        date_col = col
-                        break
-                    except:
-                        pass
-
-        if not date_col:
-            raise HTTPException(status_code=400, detail="Could not detect a Date/Time column in the dataset.")
-
-        # Auto-detect target metric (Sales, Revenue, etc.)
+        # 1. Target Column Detection
         target_col = None
         for col in df.columns:
             if col.lower() in ['sales', 'revenue', 'total', 'amount', 'profit', 'quantity', 'price']:
@@ -89,28 +69,57 @@ async def upload_and_forecast(file: UploadFile = File(...)):
                 
         if not target_col:
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            if date_col in numeric_cols:
-                numeric_cols.remove(date_col)
             if numeric_cols:
-                target_col = numeric_cols[-1] # Usually the last numeric column is the target
+                target_col = numeric_cols[-1]
 
         if not target_col:
             raise HTTPException(status_code=400, detail="Could not detect a numeric target column (e.g., Sales, Price) in the dataset.")
 
-        # Rename them internally so the rest of the script works
-        df = df.rename(columns={date_col: 'Date', target_col: 'Sales'})
-        
-        # Clean the target column to handle any currency symbols, commas, or text (e.g. '$10', '1,000 USD')
+        df = df.rename(columns={target_col: 'Sales'})
         df['Sales'] = df['Sales'].astype(str).str.replace(r'[^\d.-]', '', regex=True)
         df['Sales'] = pd.to_numeric(df['Sales'], errors='coerce')
         
-        df = df.dropna(subset=['Date', 'Sales'])
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df = df.dropna(subset=['Date', 'Sales'])
-        df = df.sort_values('Date')
-        
+        # Drop rows where target is NaN before date processing
+        df = df.dropna(subset=['Sales'])
         if len(df) == 0:
-            raise HTTPException(status_code=400, detail="All rows were dropped. Ensure your date column is formatted correctly.")
+            raise HTTPException(status_code=400, detail="Target column contained no valid numbers.")
+
+        # 2. Robust Date Column Detection
+        date_col = None
+        for col in df.columns:
+            if col == 'Sales':
+                continue
+            # Look for explicit names first, then check if they actually parse
+            if 'date' in col.lower() or 'time' in col.lower() or 'month' in col.lower() or 'year' in col.lower():
+                parsed = pd.to_datetime(df[col].dropna().head(20), errors='coerce')
+                if parsed.notna().sum() > 0:
+                    date_col = col
+                    break
+        
+        # Fallback if no named column worked
+        if not date_col:
+            for col in df.columns:
+                if col == 'Sales':
+                    continue
+                parsed = pd.to_datetime(df[col].dropna().head(20), errors='coerce')
+                if parsed.notna().sum() > 5: # Needs at least a few valid dates to be trusted
+                    date_col = col
+                    break
+
+        if date_col:
+            df = df.rename(columns={date_col: 'Date'})
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            df = df.dropna(subset=['Date'])
+            if len(df) == 0:
+                # If we dropped everything, fallback to dummy
+                date_col = None
+
+        if not date_col:
+            # Fallback: No valid date column found. Generate sequential daily dates so forecasting can still run on the sequence!
+            start_date = pd.Timestamp.now() - pd.DateOffset(days=len(df))
+            df['Date'] = pd.date_range(start=start_date, periods=len(df), freq='D')
+
+        df = df.sort_values('Date')
 
         # Determine aggregation frequency
         date_min = df['Date'].min()
