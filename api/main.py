@@ -59,10 +59,45 @@ async def upload_and_forecast(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
     
-    # Expected columns: Date, Sales, Category, Region
-    required_cols = ['Date', 'Sales']
-    if not all(col in df.columns for col in required_cols):
-        raise HTTPException(status_code=400, detail="Dataset must contain 'Date' and 'Sales' columns.")
+    # Auto-detect Date column
+    date_col = None
+    for col in df.columns:
+        if 'date' in col.lower() or 'time' in col.lower() or 'month' in col.lower() or 'year' in col.lower():
+            date_col = col
+            break
+            
+    if not date_col:
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                try:
+                    pd.to_datetime(df[col].dropna().iloc[0])
+                    date_col = col
+                    break
+                except:
+                    pass
+
+    if not date_col:
+        raise HTTPException(status_code=400, detail="Could not detect a Date/Time column in the dataset.")
+
+    # Auto-detect target metric (Sales, Revenue, etc.)
+    target_col = None
+    for col in df.columns:
+        if col.lower() in ['sales', 'revenue', 'total', 'amount', 'profit', 'quantity']:
+            target_col = col
+            break
+            
+    if not target_col:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        if date_col in numeric_cols:
+            numeric_cols.remove(date_col)
+        if numeric_cols:
+            target_col = numeric_cols[-1] # Usually the last numeric column is the target
+
+    if not target_col:
+        raise HTTPException(status_code=400, detail="Could not detect a numeric target column (e.g., Sales) in the dataset.")
+
+    # Rename them internally so the rest of the script works
+    df = df.rename(columns={date_col: 'Date', target_col: 'Sales'})
     
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date')
@@ -110,16 +145,21 @@ async def upload_and_forecast(file: UploadFile = File(...)):
     df['Month_Name'] = df['Date'].dt.month_name()
     seasonal = df.groupby('Month_Name')['Sales'].sum().to_dict()
     
-    # Category Insights
+    # Category Insights & Region Insights
     category_insights = {}
-    if 'Category' in df.columns:
-        cat_sales = df.groupby('Category')['Sales'].sum().sort_values(ascending=False)
+    region_insights = {}
+    
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    categorical_cols = [c for c in categorical_cols if c not in ['Date', 'Month_Year', 'Month_Name'] and df[c].nunique() < 50]
+    
+    if len(categorical_cols) > 0:
+        cat_col = categorical_cols[0]
+        cat_sales = df.groupby(cat_col)['Sales'].sum().sort_values(ascending=False)
         category_insights = cat_sales.head(5).to_dict()
         
-    # Region insights if available
-    region_insights = {}
-    if 'Region' in df.columns:
-        reg_sales = df.groupby('Region')['Sales'].sum().sort_values(ascending=False)
+    if len(categorical_cols) > 1:
+        reg_col = categorical_cols[1]
+        reg_sales = df.groupby(reg_col)['Sales'].sum().sort_values(ascending=False)
         region_insights = reg_sales.head(5).to_dict()
     
     # Smart Alerts / AI Recommendations

@@ -113,7 +113,7 @@ function App() {
         {!data ? (
           <div className="upload-section glass-panel">
             <h2>Upload Historical Data</h2>
-            <p className="subtitle">Upload your CSV, Excel, or ZIP files containing 'Date' and 'Sales' columns to generate an AI-powered forecast. (ZIP files will be auto-extracted).</p>
+            <p className="subtitle">Upload your CSV, Excel, or ZIP dataset. Our AI will automatically analyze your columns and generate a comprehensive forecast.</p>
             
             <div 
               className={`upload-zone ${file ? 'has-file' : ''}`}
